@@ -16,6 +16,16 @@ Native DSH tools for a session-scoped Windows host reached through OpenSSH. Remo
 
 Mutating operations and execution require host approval. Tools require a host agent session; calls without one fail closed. Remote paths are passed as base64 JSON data, never interpolated into PowerShell source.
 
+## Install
+
+```
+dsh plugin --profile web add github:kmizmal/dsh-windows-ssh
+```
+
+Then restart the profile so the loader mounts the new bundle entry; the plugin has no runtime hot-reload path.
+
+The host packages `@deepseek-ai/dsh-tools` and `@deepseek-ai/schemastery` are declared as optional peers because the DSH boot process supplies them. Importing the installed module directly with plain `node` from the profile directory therefore fails to resolve them; that is expected and is not a packaging defect. Use `npm run test:host` for a real activation check instead.
+
 ## Configuration
 
 The package is loaded as a DSH plugin through its cordis.patch.yml bundle entry. Set identityFile to the SSH private key and adjust host, user, port, and bounded timeout/size limits. The default endpoint is la2.zmal.top:20022 for user zmal.
