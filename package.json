@@ -1,0 +1,42 @@
+{
+  "name": "dsh-windows-ssh",
+  "version": "0.1.0",
+  "description": "Session-scoped Windows PowerShell over OpenSSH native DSH tools",
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js"
+  },
+  "files": [
+    "index.js",
+    "cordis.patch.yml",
+    "lib",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=24.0.0",
+    "dsh": ">=0.2.1-rc.5 <0.3.0"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-tools": "0.2.1-rc.5",
+    "@deepseek-ai/schemastery": "~3.18.5"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/dsh-tools": {
+      "optional": true
+    },
+    "@deepseek-ai/schemastery": {
+      "optional": true
+    }
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "test:host": "node scripts/test-dsh-host.mjs"
+  },
+  "license": "GPL-3.0-only"
+}

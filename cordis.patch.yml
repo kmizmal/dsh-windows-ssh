@@ -1,0 +1,3 @@
+- insert:
+    - id: windows-ssh
+      name: dsh-windows-ssh
