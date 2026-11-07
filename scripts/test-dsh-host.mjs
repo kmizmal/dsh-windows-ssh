@@ -9,6 +9,12 @@ const load=name=>import(pathToFileURL(requireHost.resolve(name)).href);
 registerHooks({resolve(specifier,context,next){return next(specifier,specifier.startsWith('@deepseek-ai/')?{...context,parentURL:hostURL}:context);}});
 const [{Context,Service},{ToolRuntime,assertSupportedJsonSchema},boot,plugin]=await Promise.all([load('@deepseek-ai/cordis'),load('@deepseek-ai/dsh-tools'),load('@deepseek-ai/dsh-app-boot'),import('../index.js')]);
 class Prompt extends Service {constructor(ctx){super(ctx,'systemPrompt');}tools(){return ()=>{};}section(){return ()=>{};}assemble(){return {sections:[],contexts:[],tools:[],variables:{}};}}
+/** Stands in for dsh-user-approval: answers 'allowed-once' and counts how often it was asked. */
+class Approval extends Service {
+  constructor(ctx){super(ctx,'approval');this.asked=[];}
+  effectivePolicy(){return 'ask';}
+  async request(req){this.asked.push(req.toolName);return 'allowed-once';}
+}
 const ctx=new Context();let calls=0;let remoteCalls=0;
 const agent={session:{id:'fixture-session',header:{cwd:'/tmp'}},get ctx(){return ctx;}};
 const call=async(name,args={},actor=agent)=>{const r=await ctx.tools.execute({name,arguments:args,agent:actor,callId:'fixture-'+(++calls),signal:new AbortController().signal});return {r,value:r.isError?undefined:JSON.parse(r.content.filter(b=>b.type==='text').map(b=>b.text).join('\n'))};};
@@ -28,5 +34,14 @@ try {
  for(const [name,args]of [['windows_exec',{script:'whoami'}],['windows_write',{path:'x',content:'x'}],['windows_replace',{path:'x',oldString:'x',newString:'y',expectedVersion:'v'}],['windows_upload',{localPath:'x',remotePath:'y'}],['windows_download',{localPath:'x',remotePath:'y'}],['windows_job',{action:'cancel',id:'x'}]]) {const denied=await call(name,args);assert.equal(denied.r.isError,true,name+' must fail closed without approval service');}
  assert.equal(remoteCalls,before);
  await fiber.dispose();assert.equal(ctx.tools.schemas().length,0);
- console.log('Real ToolRuntime fixture passed: nine schemas, fake transport, session guard, approval fail-closed, disposal. No Windows connections.');
+ // Approval is remembered per class for one session: the first call asks, later ones do not.
+ await ctx.plugin(Approval).await();
+ fiber=ctx.plugin({name:'windows-fixture-approval',inject:['tools'],apply(context){plugin.install(context,{}, {buildOperation:(op,args)=>JSON.stringify({op,args}),transport:async()=>({stdout:JSON.stringify({ok:true}),stderr:'',exitCode:0,timedOut:false,aborted:false,truncated:false,remoteStateUnknown:false})});}});await fiber.await();
+ const approval=ctx.get('approval');
+ await call('windows_exec',{script:'whoami'});await call('windows_exec',{script:'hostname'});
+ assert.deepEqual(approval.asked,['windows_exec'],'a second windows_exec must reuse the session grant');
+ await call('windows_write',{path:'x',content:'x'});
+ assert.deepEqual(approval.asked,['windows_exec','windows_write'],'mutations keep their own class');
+ await call('windows_status');assert.equal(approval.asked.length,2,'read-only tools never ask');
+ console.log('Real ToolRuntime fixture passed: nine schemas, fake transport, session guard, approval fail-closed, one prompt per approval class, disposal. No Windows connections.');
 } finally {await ctx.fiber.dispose();}

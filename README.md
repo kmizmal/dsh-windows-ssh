@@ -16,6 +16,17 @@ Native DSH tools for a session-scoped Windows host reached through OpenSSH. Remo
 
 Mutating operations and execution require host approval. Tools require a host agent session; calls without one fail closed. Remote paths are passed as base64 JSON data, never interpolated into PowerShell source.
 
+### Approval behaviour
+
+Approval is requested by class, once per host session: the first `windows_exec` asks, and later `windows_exec` calls in the same session run without a prompt. `windows_write`, `windows_replace`, `windows_upload`, `windows_download` and `windows_job` with `action: "cancel"` share a separate `mutate` class, so consent for execution does not silently authorise writes, and vice versa. Read-only tools (`windows_status`, `windows_read`, `windows_readlines`, `windows_job` list/get) never ask.
+
+Consent is recorded only when a call actually reaches the tool body, which the host permits only after its own gate passed. Two consequences are deliberate:
+
+- Under an `approval: "never"` policy the plugin stays silent instead of asking. The host resolves every ask to `rejected` in that mode, so asking would turn a working preset into a failure; the preset's explicit opt-out governs.
+- Consent is never recorded in that mode, so switching the session back to `ask` prompts again.
+
+Set `approvalMode: "call"` to restore per-call prompting. Consent lives in memory for the plugin instance and is keyed by host session id, so it is dropped when the profile restarts and never crosses sessions. Cancelling an SSH call still does not prove the remote process stopped; that caveat applies to the cancellation audit trail, not to whether a later call is allowed.
+
 ## Install
 
 ```
@@ -29,6 +40,8 @@ The host packages `@deepseek-ai/dsh-tools` and `@deepseek-ai/schemastery` are de
 ## Configuration
 
 The package is loaded as a DSH plugin through its cordis.patch.yml bundle entry. Set identityFile to the SSH private key and adjust host, user, port, and bounded timeout/size limits. The default endpoint is la2.zmal.top:20022 for user zmal.
+
+- `approvalMode`: `"session"` (default) prompts once per approval class per host session; `"call"` prompts for every call.
 
 ## Verification
 

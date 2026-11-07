@@ -1,6 +1,6 @@
 import z from '@deepseek-ai/schemastery';
 import { defineTool } from '@deepseek-ai/dsh-tools';
-import { createService, approvalDecision, sessionId, OPERATIONS } from './lib/service.mjs';
+import { createService, sessionId, OPERATIONS } from './lib/service.mjs';
 export const name='dsh-windows-ssh';
 export const inject=['tools'];
 export const Config=z.object({
@@ -9,6 +9,7 @@ export const Config=z.object({
   timeoutMs:z.natural().min(1).max(600000).default(30000),maxTimeoutMs:z.natural().min(1).max(600000).default(600000),
   maxReadBytes:z.natural().min(1024).max(1048576).default(262144),maxOutputBytes:z.natural().min(65536).max(8388608).default(1048576),
   maxTransferBytes:z.natural().min(1).max(67108864).default(16777216),maxJobsPerSession:z.natural().min(1).max(64).default(16),maxSessions:z.natural().min(1).max(1024).default(128),enabled:z.boolean().default(true),
+  approvalMode:z.union([z.const('session'),z.const('call')]).default('session'),
 });
 const str=(description,required=false)=>({type:'string',description,...(required?{required:true}:{})});
 const num=(description)=>({type:'integer',description});
@@ -32,7 +33,7 @@ export function install(ctx,config={},dependencies={}) {
   const logger=ctx.logger?.('windows-ssh');
   try {
     ctx.effect(()=>ctx.tools.guard(exec=>{if(!OPERATIONS.some(op=>exec.name==='windows_'+op))return; if(config.enabled===false)return 'Windows SSH tools are disabled';try{sessionId(exec);}catch(e){return e.message;}}));
-    ctx.on('tools/pre-execute',async(exec,next)=>{const decision=approvalDecision(exec);if(!decision)return next();const previous=await next();return previous.kind==='allow'?decision:previous;});
+    ctx.on('tools/pre-execute',async(exec,next)=>{const decision=service.approvalFor(exec);if(!decision)return next();const previous=await next();return previous.kind==='allow'?decision:previous;});
     ctx.on('dispose',()=>service.dispose());
     for(const [op,[description,parameters]]of Object.entries(specs)){
       ctx.effect(()=>ctx.tools.register(defineTool({name:'windows_'+op,description,parameters,
