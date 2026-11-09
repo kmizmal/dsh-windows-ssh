@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import { mkdtemp, writeFile, chmod, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { getEventListeners } from 'node:events';
+import { getEventListeners } from "node:events";
+import { spawnSync } from "node:child_process";
 
 const config = { host: 'example.invalid', user: 'windows-user', port: 20022 };
 const load = () => import('../lib/transport.mjs');
@@ -38,9 +39,18 @@ test('SSH arguments protect host keys and preserve Unicode script without shell 
   const remote = args.slice(hostIndex + 1).join(' ');
   assert.match(remote, /^pwsh -NoLogo -NoProfile -NonInteractive -EncodedCommand [A-Za-z0-9+/=]+$/);
   const decoded = Buffer.from(remote.split(' ').at(-1), 'base64').toString('utf16le');
-  assert.match(decoded, /\[Console\]::OutputEncoding\s*=/);
+  // The console stays UTF-8: decodePrefix() reads the SSH stream as UTF-8, so an OEM console
+  // page would silently corrupt every JSON response while JSON.parse still succeeded.
+  assert.match(decoded, /\[Console\]::OutputEncoding\s*=\s*\[System\.Text\.UTF8Encoding\]/);
   assert.match(decoded, /\$OutputEncoding\s*=/);
   assert.match(decoded, /UTF8Encoding/);
+  assert.match(decoded, /-Name OEMCP/);
+  assert.match(decoded, /\$env:DSH_OEMCP=/);
+  // The PowerShell channel must not export these: only the python channel pins them.
+  assert.doesNotMatch(decoded, /PYTHONUTF8/);
+  assert.doesNotMatch(decoded, /PYTHONIOENCODING/);
+  assert.doesNotMatch(decoded, /chcp/);
+  assert.doesNotMatch(decoded, /GetEncoding\(\$__dshOem\)/);
   assert.ok(decoded.endsWith(script));
 });
 
@@ -180,4 +190,107 @@ test('ignored SIGTERM is escalated to SIGKILL', async t => {
   assert.equal(result.timedOut, true);
   assert.equal(result.signal, 'SIGKILL');
   assert.equal(result.remoteStateUnknown, true);
+});
+
+test('preamble probes OEMCP, stays silent, and never exports python settings into exec', async () => {
+  const { PREAMBLE } = await load();
+  // OEMCP is probed from the registry, not hardcoded, and falls back to UTF-8 on failure.
+  assert.match(PREAMBLE, /HKLM:\\SYSTEM\\CurrentControlSet\\Control\\Nls\\CodePage/);
+  assert.match(PREAMBLE, /-Name OEMCP/);
+  assert.match(PREAMBLE, /catch\{\$__dshOem=65001\}/m, 'a failed probe must fall back to UTF-8');
+  // The transport decodes SSH as UTF-8, so PowerShell output must stay UTF-8.
+  assert.match(PREAMBLE, /\[Console\]::OutputEncoding=\[System\.Text\.UTF8Encoding\]::new\(\$false\)/);
+  assert.match(PREAMBLE, /\$OutputEncoding=\[System\.Text\.UTF8Encoding\]::new\(\$false\)/);
+  // Progress/ANSI noise suppression, with the PS5 guard around $PSStyle.
+  assert.match(PREAMBLE, /\$ProgressPreference='SilentlyContinue'/);
+  assert.match(PREAMBLE, /try\{\$PSStyle\.OutputRendering='PlainText'\}catch\{\}/);
+  // Defaults that would change user script semantics must not be touched.
+  assert.doesNotMatch(PREAMBLE, /ErrorActionPreference/);
+  assert.doesNotMatch(PREAMBLE, /chcp/);
+  assert.doesNotMatch(PREAMBLE, /PYTHONUTF8|PYTHONIOENCODING/);
+  // Every statement must be side-effect free: no bare expression can emit to stdout.
+  for (const line of PREAMBLE.split('\n').filter(Boolean)) {
+    assert.match(line, /^(try\{|if\(|\$|\[|[A-Za-z]|\})/, 'unexpected statement: ' + line);
+  }
+});
+
+test('python preamble pins both directions to UTF-8 and sets the python env', async () => {
+  const { PYTHON_PREAMBLE, buildPythonArgs, PREAMBLE } = await load();
+  assert.match(PYTHON_PREAMBLE, /\[Console\]::OutputEncoding=\[System\.Text\.UTF8Encoding\]::new/);
+  assert.match(PYTHON_PREAMBLE, /\$env:PYTHONUTF8='1'/);
+  assert.match(PYTHON_PREAMBLE, /\$env:PYTHONIOENCODING='utf-8'/);
+  assert.match(PYTHON_PREAMBLE, /\$ProgressPreference='SilentlyContinue'/);
+  const args = buildPythonArgs({ ...config }, 'print(1)');
+  const encoded = args[args.length - 1];
+  const decoded = Buffer.from(encoded, 'base64').toString('utf16le');
+  assert.ok(decoded.startsWith(PYTHON_PREAMBLE), 'python must use its own preamble');
+  assert.ok(!decoded.includes('$env:DSH_OEMCP'), 'the python channel does not probe OEMCP');
+  assert.ok(decoded.endsWith('exit $LASTEXITCODE\n'), 'native exit codes must propagate');
+  // The program never reaches the command line: only the fixed bootstrap is encoded.
+  assert.ok(!decoded.includes('print(1)'));
+  assert.ok(!args.join(' ').includes('print(1)'));
+});
+
+test('python bootstrap probes interpreters in order and rejects Store placeholders', async () => {
+  const { buildPythonBootstrap, DEFAULT_PYTHON_CANDIDATES } = await load();
+  assert.deepEqual(DEFAULT_PYTHON_CANDIDATES, ['py -3.14', 'py -3', 'python', 'python3']);
+  const boot = buildPythonBootstrap();
+  // Ordered probe, and version text is the evidence: a Store alias exits 9009 with no output.
+  assert.ok(boot.indexOf("'py -3.14'") < boot.indexOf("'python3'"));
+  assert.match(boot, /--version/);
+  assert.match(boot, /\^Python \\d\+\\\./);
+  assert.match(boot, /DSH_PYTHON_NOT_FOUND/);
+  assert.match(boot, /exit 127/);
+  // The program travels on stdin, so argv must never carry it.
+  assert.match(boot, /\[Console\]::In\.ReadToEnd\(\)/);
+  assert.match(boot, /\|& \$__dshExe @__dshPre -/);
+});
+
+test('python bootstrap validates candidate names against command injection', async () => {
+  const { buildPythonBootstrap } = await load();
+  for (const bad of [[], ['py -3.14; whoami'], ['py $(whoami)'], ["py 'x'"], ['py -3 ] ; evil'], [5]]) {
+    assert.throws(() => buildPythonBootstrap(bad), /pythonCandidates/);
+  }
+  assert.equal(buildPythonBootstrap(['py -3.14']).includes("'py -3.14'"), true);
+});
+
+test('runPython sends the source on stdin and propagates the interpreter exit code', async t => {
+  const { runPython } = await load();
+  // Fake ssh captures stdin (the program) and exits 4 the way python would.
+  const cfg = await fakeSsh(t, 'let data="";process.stdin.on("data",c=>data+=c);process.stdin.on("end",()=>{process.stdout.write("got:"+data);process.exitCode=4});');
+  const result = await runPython(cfg, 'import sys\nsys.exit(4)\n');
+  assert.equal(result.stdout, 'got:import sys\nsys.exit(4)\n');
+  assert.equal(result.exitCode, 4);
+  assert.equal(result.timedOut, false);
+});
+
+// Runs the real preamble through a local pwsh. Skipped where pwsh is absent, the same way the
+// helper tests skip; it is the only test that observes the preamble's actual runtime behaviour.
+const pwshAvailable = spawnSync('pwsh', ['-NoProfile', '-Command', '$PSVersionTable.PSVersion.ToString()']).status === 0;
+test('preamble produces no output and leaves user-visible defaults alone', {skip:!pwshAvailable}, async () => {
+  const { PREAMBLE } = await load();
+  const { spawnSync } = await import('node:child_process');
+  const run = script => spawnSync('pwsh', ['-NoLogo','-NoProfile','-NonInteractive','-EncodedCommand',
+    Buffer.from(script, 'utf16le').toString('base64')], { encoding: 'utf8' });
+  // Alone, the preamble must be completely silent: any stray expression would pollute stdout.
+  const bare = run(PREAMBLE);
+  assert.equal(bare.status, 0, bare.stderr);
+  assert.equal(bare.stdout, '', 'the preamble must not write to stdout');
+  assert.equal(bare.stderr, '', 'the preamble must not write to stderr');
+  // It must not change error semantics, and it must apply the three suppression settings.
+  // Cast every preference to [string]: `$enum + "|"` otherwise tries to convert "|" into the
+  // enum type and throws InvalidArgument.
+  const observed = run(PREAMBLE + '[string]$ErrorActionPreference + "|" + [string]$ProgressPreference + "|" + ' +
+    '[string]$PSStyle.OutputRendering + "|" + [Console]::OutputEncoding.WebName + "|" + $env:DSH_OEMCP');
+  assert.equal(observed.status, 0, observed.stderr);
+  const [eap, progress, rendering, consoleEnc, oem] = observed.stdout.trim().split('|');
+  assert.equal(eap, 'Continue', 'the preamble must not change $ErrorActionPreference');
+  assert.equal(progress, 'SilentlyContinue');
+  assert.equal(rendering, 'PlainText');
+  assert.equal(consoleEnc.toLowerCase(), 'utf-8', 'PowerShell output must stay UTF-8 for the transport decoder');
+  assert.match(oem ?? '', /^\d+$/, 'OEMCP must be probed and exported as a number');
+  // Re-running it must be idempotent and still silent.
+  const twice = run(PREAMBLE + PREAMBLE);
+  assert.equal(twice.status, 0, twice.stderr);
+  assert.equal(twice.stdout + twice.stderr, '', 'the preamble must be idempotent and silent');
 });
