@@ -28,7 +28,7 @@ const specs={
   write:['Write remote text after approval; overwrite must be explicitly true.',{...path,content:str('Text content',true),overwrite:bool('Explicit overwrite'),encoding:str('Text encoding')}],
   replace:['Replace literal text after approval; requires read fingerprint and rejects ambiguous matches or stale versions.',{...path,oldString:str('Literal text to replace',true),newString:str('Replacement text, may be empty',true),expectedVersion:str('Required fingerprint from a read',true),all:bool('Replace all matches; default false'),expectedCount:num('Required match count when supplied')}],
   upload:['Upload one bounded binary file using the session filesystem reader, stage remotely, and verify SHA256.',transfer],
-  download:['Download a bounded binary file after approval; verify SHA256 and atomically publish within the session workspace.',{localPath:str('Local path inside the session workspace',true),remotePath:str('Remote Windows path',true),overwrite:bool('Explicitly allow overwrite; default false'),maxBytes:num('Maximum download bytes, capped by config')}],
+  download:['Download one remote file after approval: the bytes stream out of band, the remote verifies SHA256 and atomically publishes, and only the resulting path is returned.',{remotePath:str('Remote Windows path',true),overwrite:bool('Explicitly allow overwrite; default false'),maxBytes:num('Byte ceiling; defaults to maxTransferBytes and cannot exceed it')}],
   job:['List, inspect or cancel current-session SSH jobs. Cancel requires approval and remote process state remains unknown.',{id:str('Job id for get/cancel'),action:str('get (default), list, or cancel')}],
 };
 /** Dependency injection is an ordinary embedding seam; apply uses production dependencies. */

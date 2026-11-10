@@ -12,7 +12,7 @@ Native DSH tools for a session-scoped Windows host reached through OpenSSH. Remo
 - windows_write: create or explicitly overwrite a remote text file.
 - windows_replace: replace literal text using a required version fingerprint; ambiguous matches are rejected unless all and expectedCount are supplied.
 - windows_upload: stage a bounded local file remotely and verify SHA-256 before atomic publication.
-- windows_download: verify remote byte count and SHA-256, then publish atomically inside the session workspace through the host sandbox shell executor. Because the bytes travel base64 inside one response, the practical cap is about three quarters of `maxOutputBytes` (roughly 780 KiB with defaults); larger files must be fetched in pieces with `windows_exec` or raised limits.
+- windows_download: stream the file out of band, then publish it atomically on the remote side. The response is a one-line record after a 4-byte length header; everything after that header's record is the file, so the payload never enters JSON and the old ~780 KiB ceiling (three quarters of `maxOutputBytes`) is gone. The ceiling is now `maxTransferBytes` (16 MiB by default) and only the resulting path comes back.
 - windows_job: list, inspect, or cancel current-session jobs. Cancelling local SSH does not prove the remote process stopped.
 
 Mutating operations and execution require host approval. Tools require a host agent session; calls without one fail closed. Remote paths are passed as base64 JSON data, never interpolated into PowerShell source. `windows_py` shares the `exec` approval class with `windows_exec`: one consent covers both, because both run arbitrary code on the host.

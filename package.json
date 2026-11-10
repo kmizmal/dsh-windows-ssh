@@ -1,6 +1,6 @@
 {
   "name": "dsh-windows-ssh",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "Session-scoped Windows PowerShell over OpenSSH native DSH tools",
   "type": "module",
   "main": "index.js",

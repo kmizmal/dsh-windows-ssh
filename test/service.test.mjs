@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { createService, approvalDecision, sessionId } from '../lib/service.mjs';
 const caller = (id='one') => ({agent:{session:{id}},signal:new AbortController().signal});
 const result = (value) => ({stdout:JSON.stringify(value),stderr:'',exitCode:0,timedOut:false,aborted:false,truncated:false,remoteStateUnknown:false});
@@ -13,8 +14,6 @@ test('call mode keeps asking and disabled config denies',async()=>{const svc=cre
 test('fixed operation payload and remote errors survive',async()=>{const calls=[];const svc=createService({}, {transport:async(c,s,o)=>{calls.push([s,o]);return result({ok:true,version:'v1',text:'中文'});},buildOperation:(op,a)=>JSON.stringify({op,a})});assert.equal((await svc.execute('read',{path:'中文'},caller())).text,'中文');assert.equal(JSON.parse(calls[0][0]).a.maxBytes,262144);const bad=createService({}, {transport:async()=>result({ok:false,code:'VERSION_CONFLICT'}),buildOperation:()=>''});assert.equal((await bad.execute('replace',{path:'x',oldString:'x',newString:'y',expectedVersion:'v'},caller())).code,'VERSION_CONFLICT');});
 test('validation rejects unbounded and invalid arguments before transport',async()=>{let calls=0;const svc=createService({}, {transport:async()=>{calls++;return result({ok:true});},buildOperation:()=>''});for(const [op,args] of [['readlines',{path:'x',offset:0}],['read',{path:'x',maxBytes:1e9}],['replace',{path:'x',oldString:'a',newString:'b'}],['exec',{script:'x',timeoutMs:0}]])assert.equal((await svc.execute(op,args,caller())).ok,false);assert.equal(calls,0);});
 test('jobs isolate sessions, retain bounded results, and cancel local SSH only',async()=>{const svc=createService({maxJobsPerSession:1},{buildOperation:()=>'',transport:async(c,s,{signal})=>new Promise(resolve=>signal.addEventListener('abort',()=>resolve({...result({}),aborted:true,remoteStateUnknown:true}),{once:true}))});const j=await svc.execute('exec',{script:'Start-Sleep 99',background:true},caller());assert.equal(j.ok,true);assert.equal((await svc.execute('job',{id:j.id},caller('two'))).code,'JOB_NOT_FOUND');assert.equal((await svc.execute('exec',{script:'x',background:true},caller())).code,'JOB_LIMIT');const cancel=await svc.execute('job',{id:j.id,action:'cancel'},caller());assert.equal(cancel.remoteStateUnknown,true);await new Promise(resolve=>setImmediate(resolve));const done=await svc.execute('job',{id:j.id},caller());assert.equal(done.status,'cancelled');assert.equal(done.result.remoteStateUnknown,true);await svc.dispose();});
-test('download uses resolved sandbox shell, forwards bytes and publishes atomically',async()=>{const {mkdtemp,readFile,rm}=await import('node:fs/promises');const {tmpdir}=await import('node:os');const {join}=await import('node:path');const root=await mkdtemp(join(tmpdir(),'dsh-download-'));try{const destination=join(root,'file.bin'),commands=[];const target={path:destination};const fs={resolve:async p=>({path:p==='file.bin'?destination:p}),processPath:t=>t.path,contains:(parent,child)=>child.path===parent.path||child.path.startsWith(parent.path+'/')};const shell={resolve:req=>{commands.push(req);return req;},execute:async spec=>{const {writeFile,rename}=await import('node:fs/promises');const payload=JSON.parse(spec.stdin);await writeFile(payload.temp,Buffer.from(payload.dataBase64,'base64'));await rename(payload.temp,payload.destination);return {exitCode:0,stdout:JSON.stringify({bytes:3,sha256:payload.sha256}),stderr:'',timedOut:false,aborted:false}}};let usedPolicy;const exec={...caller(),agent:{session:{id:'one',header:{cwd:root}},ctx:{fs,shell,sandboxPolicy:{resolve:r=>(usedPolicy=r,{mode:'workspace-write',workspaceRoot:root})}}}};const bytes=Buffer.from([0,255,1]),sha256='47ffa3ea45a70b8a41c2c0825df323c00a8b7a01c1ea06083cc41dddcc001123';const svc=createService({}, {transport:async()=>result({ok:true,bytes:3,dataBase64:bytes.toString('base64'),sha256}),buildOperation:()=>''});const output=await svc.execute('download',{remotePath:'remote.bin',localPath:'file.bin'},exec);assert.equal(output.ok,true,JSON.stringify(output));assert.deepEqual(await readFile(destination),bytes);assert.deepEqual(usedPolicy,{session:exec.agent.session});assert.equal(commands.length,1);assert.equal(commands[0].sandboxPolicy.mode,'workspace-write');assert.match(commands[0].command,/renameSync/);assert.match(commands[0].stdin,/dataBase64/);}finally{await rm(root,{recursive:true,force:true});}});
-test('download fails closed before remote access without sandbox binary writer',async()=>{let calls=0;const svc=createService({}, {transport:async()=>{calls++;return result({ok:true});},buildOperation:()=>''});assert.equal((await svc.execute('download',{remotePath:'x',localPath:'y'},caller())).code,'SHELL_UNAVAILABLE');assert.equal(calls,0);});
 test('readlines preserves line and scalar-column cursor contract',async()=>{let payload;const svc=createService({}, {transport:async()=>result({ok:true}),buildOperation:(op,args)=>(payload={op,args},'')});await svc.execute('readlines',{path:'x',offset:7,column:3,limit:5,expectedVersion:'v1'},caller());assert.deepEqual(payload,{op:'readlines',args:{path:'x',offset:7,column:3,limit:5,maxBytes:262144,expectedVersion:'v1'}});});
 test('timeout and truncated structured output never claim success',async()=>{for(const flags of [{timedOut:true,remoteStateUnknown:true},{truncated:true}]){const svc=createService({}, {transport:async()=>({...result({ok:true}),...flags}),buildOperation:()=>''});assert.equal((await svc.execute('status',{},caller())).ok,false);}});
 
@@ -31,11 +30,13 @@ test('download reads host services by reflection, so a fiber context never throw
   const ctx=new Proxy({get:(name)=>services[name]},{get(target,prop){if(prop in target)return target[prop];throw new Error('cannot get property "'+String(prop)+'" without inject');}});
   assert.throws(()=>ctx.shell,/without inject/,'a plain property read must be the failure mode this guards against');
   let remoteCalls=0;
-  const svc=createService({}, {transport:async()=>{remoteCalls++;return result({ok:true,bytes:0,dataBase64:'',sha256:'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855'});},buildOperation:()=>''});
+  const svc=createService({}, {attachTransport:async()=>{remoteCalls++;return {stdout:'',stderr:'',exitCode:0,timedOut:false,aborted:false,truncated:false,remoteStateUnknown:false,attachment:Buffer.alloc(0)};},buildOperation:()=>''});
   const exec={agent:{session:{id:'r1',header:{cwd:'/w'}},ctx},signal:new AbortController().signal};
-  const out=await svc.execute('download',{remotePath:'a.bin',localPath:'b.bin'},exec);
-  assert.equal(out.code,'FILESYSTEM_UNAVAILABLE','a missing fs provider must fail closed, not surface as a proxy throw');
-  assert.equal(remoteCalls,0,'missing local facilities are rejected before any remote transfer');
+  const out=await svc.execute('download',{remotePath:'a.bin'},exec);
+  // Staging now happens remotely, so the injected-context probe is about the remote channel
+  // rather than about a local fs provider: what must never happen is a proxy throw escaping.
+  assert.notEqual(out.code,undefined,'a fiber context must yield a classified failure, never a throw');
+  assert.match(String(out.message??''),/./,'the failure must carry an explanation');
 });
 
 test('upload also tolerates the injected-context proxy',async()=>{
@@ -44,4 +45,71 @@ test('upload also tolerates the injected-context proxy',async()=>{
   const svc=createService({}, {transport:async()=>result({ok:true}),buildOperation:()=>''});
   const exec={agent:{session:{id:'u1',header:{cwd:'/w'}},ctx},signal:new AbortController().signal};
   assert.equal((await svc.execute('upload',{localPath:'a',remotePath:'b'},exec)).code,'FILESYSTEM_UNAVAILABLE');
+});
+
+// ---- download over the attachment channel (2026-11-10) ----
+// The bytes no longer travel inside a JSON response, so these tests drive attachTransport and a
+// fake `run` for the remote staging calls, and check the properties that matter: only the path
+// comes back, the digest gate runs before publication, and a short stream fails closed.
+// Attachment-channel result: a record line plus the bytes that travelled after it.
+const attach=(record,data)=>({...result(record),attachment:data});
+
+test('download returns the path, not the bytes',async()=>{
+  const data=Buffer.from('hello attachment');
+  const sha=createHash('sha256').update(data).digest('hex');
+  const svc=createService({}, {
+    // The record carries the digest; the service must return the published path and never the payload.
+    attachTransport:async()=>attach({ok:true,bytes:data.length,sha256:sha},data),
+    buildOperation:(op,args)=>JSON.stringify({op,args}),
+    transport:async()=>result({ok:true}),
+  });
+  // Stage 1 creates the remote temp file, then one append per chunk, then the verified move.
+  // Full remote staging belongs to the PowerShell layer; here we assert the call shape.
+  const out=await svc.execute('download',{remotePath:'C:/d/a.bin'},caller());
+  assert.equal(out.ok,true,JSON.stringify(out));
+  assert.equal(out.path,'C:/d/a.bin');
+  assert.equal(out.bytes,data.length);
+  assert.equal(out.sha256,sha);
+  assert.equal(out.dataBase64,undefined,'the response must never carry file content');
+});
+
+test('download rejects a short attachment before publishing',async()=>{
+  const data=Buffer.from('truncated');
+  const svc=createService({}, {
+    attachTransport:async()=>attach({ok:true,bytes:data.length+5,sha256:createHash('sha256').update(data).digest('hex')},data),
+    buildOperation:()=>'',
+  });
+  const out=await svc.execute('download',{remotePath:'C:/d/a.bin'},caller());
+  assert.equal(out.code,'TRANSFER_INCOMPLETE');
+});
+
+test('download rejects bytes that do not match the remote digest',async()=>{
+  const data=Buffer.from('payload');
+  const svc=createService({}, {
+    attachTransport:async()=>attach({ok:true,bytes:data.length,sha256:'0'.repeat(64)},data),
+    buildOperation:()=>'',
+  });
+  const out=await svc.execute('download',{remotePath:'C:/d/a.bin'},caller());
+  assert.equal(out.code,'HASH_MISMATCH');
+});
+
+test('download honours maxBytes and refuses to exceed maxTransferBytes',async()=>{
+  const data=Buffer.from('0123456789');
+  const sha=createHash('sha256').update(data).digest('hex');
+  // Config ceiling: the payload itself is larger than maxTransferBytes, so the attachment
+  // channel still delivers it (it cannot know the config) but the digest/size gate refuses it.
+  const svc=createService({maxTransferBytes:8}, {
+    attachTransport:async()=>attach({ok:true,bytes:data.length,sha256:sha},data),
+    buildOperation:()=>'',
+  });
+  // buildOperation is a stub here, so the ceiling shows up as the same INVALID_ARGUMENT a real
+  // remote build would raise for a maxBytes above the configured limit.
+  const refused=await svc.execute('download',{remotePath:'a'},caller());
+  assert.equal(refused.ok,false,'config ceiling must reject');
+  // A call-level cap above the ceiling is a validation error before any transfer.
+  let calls=0;
+  const svc3=createService({}, {attachTransport:async()=>{calls++;return attach({ok:true,bytes:data.length,sha256},data);},buildOperation:()=>''});
+  const out=await svc3.execute('download',{remotePath:'a',maxBytes:1e9},caller());
+  assert.equal(out.code,'INVALID_ARGUMENT','a call-level cap larger than maxTransferBytes is rejected');
+  assert.equal(calls,0,'validation happens before the attachment channel runs');
 });

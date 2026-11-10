@@ -8,6 +8,7 @@ import { spawnSync } from "node:child_process";
 
 const config = { host: 'example.invalid', user: 'windows-user', port: 20022 };
 const load = () => import('../lib/transport.mjs');
+const { runPowerShellAttach } = await load();
 
 async function fakeSsh(t, source) {
   const dir = await mkdtemp(join(tmpdir(), 'windows-ssh-'));
@@ -297,4 +298,24 @@ test('preamble produces no output and leaves user-visible defaults alone', {skip
   const twice = run(PREAMBLE + PREAMBLE);
   assert.equal(twice.status, 0, twice.stderr);
   assert.equal(twice.stdout + twice.stderr, '', 'the preamble must be idempotent and silent');
+});
+
+test('attachment channel splits record from bytes by the length header', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'dsh-attach-'));
+  const script = join(dir, 'fake-ssh.sh');
+  const write = (body) => writeFile(script, '#!/bin/sh\n' + body + '\n', { mode: 0o755 });
+  try {
+    await write(`node -e "const rec=Buffer.from(JSON.stringify({ok:true,bytes:5,sha256:'x'}));const h=Buffer.alloc(4);h.writeUInt32BE(rec.length,0);process.stdout.write(Buffer.concat([h,rec,Buffer.from('HELLO')]))"`);
+    const cfg = { host: 'localhost', user: 'test', port: 22, sshBinary: script, maxOutputBytes: 1024 };
+    const ok = await runPowerShellAttach(cfg, 'ignored', { timeoutMs: 10000 });
+    assert.equal(ok.stdout, '{"ok":true,"bytes":5,"sha256":"x"}');
+    assert.equal(ok.attachment.toString(), 'HELLO');
+    // A header promising more record than arrived must not be read as data.
+    await write(`node -e "const rec=Buffer.from('{\\"ok\\":true}');const h=Buffer.alloc(4);h.writeUInt32BE(rec.length+50,0);process.stdout.write(Buffer.concat([h,rec]))"`);
+    const bad = await runPowerShellAttach(cfg, 'ignored', { timeoutMs: 10000 });
+    assert.equal(bad.stdout, '');
+    assert.equal(bad.attachment, null, 'a short record yields no attachment rather than shifted bytes');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });

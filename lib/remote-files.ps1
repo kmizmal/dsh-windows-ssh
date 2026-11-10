@@ -104,12 +104,31 @@ public static class DshRemoteFiles {
       Commit(temp,path,overwrite);var r=Info(path);r["sha256"]=hash;return r;
     }finally{if(File.Exists(temp))File.Delete(temp);}
   }
-  public static object Download(string path,int maxBytes) {
-    if(new FileInfo(path).Length>maxBytes)throw Fail("FILE_TOO_LARGE","Download exceeds transfer cap");
-    string v=Version(path);byte[] data=File.ReadAllBytes(path);string hash;
-    using(var h=SHA256.Create())hash=BitConverter.ToString(h.ComputeHash(data)).Replace("-", "").ToLowerInvariant();
-    if(Version(path)!=v)throw Fail("VERSION_CONFLICT","File changed during download");
-    var r=Info(path);r["dataBase64"]=Convert.ToBase64String(data);r["sha256"]=hash;return r;
+  // Hands the file to the SSH client as an attachment; the bytes never enter the JSON response.
+  //
+  // The old shape read the file into a byte[], base64'd it into one JSON line, and left the host
+  // to decode it back out - which is why a single download could never exceed what one JSON
+  // response can carry (maxOutputBytes*3/4-4096, about 0.75 MiB with defaults). Here stdout
+  // carries the record alone; the payload leaves on fd 5, one continuous write inside a
+  // FlowControl scope, so a large file stays a stream on both ends.
+  //
+  // The size check happens before the first byte leaves, so an oversized file fails closed with
+  // a JSON error instead of a truncated attachment - but it is a preflight check, not a
+  // guarantee: a file that grows between the check and the stream is what it is.
+  public static object BeginDownload(string path,int maxBytes) {
+    var f=new FileInfo(path);if(!f.Exists)throw Fail("NOT_FOUND","File does not exist");
+    if(f.Length>maxBytes)throw Fail("FILE_TOO_LARGE","Download exceeds transfer cap");
+    string v=Version(path);string hash=Hash(path);if(Version(path)!=v)throw Fail("VERSION_CONFLICT","File changed during download");
+    var r=Info(path);r["sha256"]=hash;r["attachment"]=true;return r;
+  }
+  public static void StreamDownload(string path) {
+    using(var s=new FileStream(path,FileMode.Open,FileAccess.Read,FileShare.ReadWrite|FileShare.Delete))
+    using(var o=Console.OpenStandardOutput(1<<20))Flow(s,o);
+  }
+  static void Flow(Stream from,Stream to) {
+    // Fixed-size buffer, offset writes: memory stays flat regardless of file size.
+    byte[] buffer=new byte[1<<20];int n;
+    while((n=from.Read(buffer,0,buffer.Length))>0){to.Write(buffer,0,n);to.Flush();}
   }
   public static object Replace(string path,string oldText,string newText,bool all,long expectedCount,string expectedVersion,string encoding) {
     if(String.IsNullOrEmpty(expectedVersion))throw Fail("INVALID_ARGUMENT","expectedVersion is mandatory");
@@ -145,6 +164,9 @@ public static class DshRemoteFiles {
   }
 }
 '@
+# Set before the try so the tail can read them even when the request itself throws.
+$streamEnabled = $false
+$streamPath = $null
 try {
   $request = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($requestBase64)) | ConvertFrom-Json -AsHashtable
   $a = $request.args
@@ -187,11 +209,33 @@ try {
         $hash = $null; if ($a.ContainsKey('sha256')) { $hash = [string]$a.sha256 }
         $result = [DshRemoteFiles]::Put($path,[Convert]::FromBase64String($a.dataBase64),[byte[]]::new(0),($a.overwrite -eq $true),$hash)
       }
-      'download' { $result = [DshRemoteFiles]::Download($path,$maxBytes) }
+      'download' {
+        $result = [DshRemoteFiles]::BeginDownload($path,$maxBytes)
+        $streamPath = $path
+        $streamEnabled = ($a.stream -eq $true)
+      }
       default { throw 'INVALID_ARGUMENT: unsupported operation' }
     }
   }
-  $result | ConvertTo-Json -Depth 12 -Compress
+  if ($streamEnabled) {
+    # ---- framed record: 4-byte big-endian length + UTF-8 JSON on ONE line ----
+    # The header states the record's byte length, so the host splits record from attachment by
+    # length alone: every byte after that prefix is file data, never part of the JSON line.
+    $record = $result | ConvertTo-Json -Depth 12 -Compress | Out-String
+    $recordBytes = [Text.Encoding]::UTF8.GetBytes($record.TrimEnd("`r","`n"))
+    $head = [byte[]]::new(4)
+    $head[0] = [byte](($recordBytes.Length -shr 24) -band 255)
+    $head[1] = [byte](($recordBytes.Length -shr 16) -band 255)
+    $head[2] = [byte](($recordBytes.Length -shr 8) -band 255)
+    $head[3] = [byte]($recordBytes.Length -band 255)
+    $out = [Console]::OpenStandardOutput()
+    $out.Write($head, 0, 4)
+    $out.Write($recordBytes, 0, $recordBytes.Length)
+    $out.Flush()
+    [DshRemoteFiles]::StreamDownload($streamPath)
+  } else {
+    $result | ConvertTo-Json -Depth 12 -Compress
+  }
 } catch {
   $message = $_.Exception.Message
   $code = 'IO_ERROR'

@@ -69,8 +69,11 @@ test('write protects existing destination and transfers verify SHA256', {skip:!p
   assert.equal(run('write',{path,content:'中文'}).ok,true);
   assert.equal(run('write',{path,content:'bad'}).error.code,'ALREADY_EXISTS');
   const bytes=Buffer.from([0,255,1,128]);const up=run('upload',{path,dataBase64:bytes.toString('base64'),overwrite:true});
-  assert.equal(up.ok,true,JSON.stringify(up));const down=run('download',{path});
-  assert.equal(down.sha256,up.sha256);assert.deepEqual(Buffer.from(down.dataBase64,'base64'),bytes);
+  assert.equal(up.ok,true,JSON.stringify(up));
+  // The download record describes the file; the bytes travel separately (transport attachment).
+  const down=run('download',{path});
+  assert.equal(down.sha256,up.sha256);assert.equal(down.dataBase64,undefined,'the record must not carry content');
+  assert.equal(down.bytes,bytes.length);
 }));
 test('line ranges, UTF16BE, missing version and failed upload cleanup', {skip:!pwsh}, () => fixture((path,dir) => {
   writeFileSync(path, 'one\r\ntwo\nthree\rfour');
