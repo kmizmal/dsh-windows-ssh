@@ -221,6 +221,10 @@ test('python preamble pins both directions to UTF-8 and sets the python env', as
   assert.match(PYTHON_PREAMBLE, /\$env:PYTHONIOENCODING='utf-8'/);
   assert.match(PYTHON_PREAMBLE, /\$ProgressPreference='SilentlyContinue'/);
   const args = buildPythonArgs({ ...config }, 'print(1)');
+  // -NoProfile is a transport invariant on every pwsh channel, not a caller convention: the
+  // remote profile loads oh-my-posh and throws on a non-interactive session.
+  assert.match(args.slice(args.indexOf(config.host) + 1).join(' '),
+    /^pwsh -NoLogo -NoProfile -NonInteractive -EncodedCommand [A-Za-z0-9+/=]+$/);
   const encoded = args[args.length - 1];
   const decoded = Buffer.from(encoded, 'base64').toString('utf16le');
   assert.ok(decoded.startsWith(PYTHON_PREAMBLE), 'python must use its own preamble');

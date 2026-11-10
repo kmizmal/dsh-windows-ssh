@@ -226,3 +226,18 @@ Parse stdout and branch on `ok`, never on the numeric code.
 
 `windows_py` shares the `exec` approval class with `windows_exec`: one consent covers both,
 because both run arbitrary code.
+
+## `-NoProfile` is already applied
+
+`lib/transport.mjs` builds every remote invocation from one constant:
+
+```
+pwsh -NoLogo -NoProfile -NonInteractive -EncodedCommand <base64 utf16le>
+```
+
+Both channels — `windows_exec` and `windows_py` — go through it, so the user profile
+(`C:\Users\<user>\ohmyposh_init.ps1`, measured on ZMAL-PC) never loads. Under a non-interactive
+SSH session oh-my-posh throws `MethodInvocationException`, which lands on stderr and breaks the
+JSON contract of every helper response. Do not try to add `-NoProfile` yourself: the payload is
+encoded, so the flags are not something a caller can influence. Bare `ssh ... "pwsh -Command ..."`
+still needs the flag — that path does not go through this plugin.

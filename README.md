@@ -1,6 +1,6 @@
 # dsh-windows-ssh
 
-Native DSH tools for a session-scoped Windows host reached through OpenSSH. Remote commands run in PowerShell 7 with UTF-16LE EncodedCommand, NoLogo, NoProfile, and UTF-8 output. The plugin does not install a Windows agent or modify SSH/frp configuration.
+Native DSH tools for a session-scoped Windows host reached through OpenSSH. Remote commands run in PowerShell 7 through one shared argv (`pwsh -NoLogo -NoProfile -NonInteractive -EncodedCommand`, UTF-16LE) on both the exec and python channels, with UTF-8 output. Because the flag lives in the transport, callers never add it and cannot lose it. The plugin does not install a Windows agent or modify SSH/frp configuration.
 
 ## Tools
 
